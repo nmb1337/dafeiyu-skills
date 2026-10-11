@@ -7,6 +7,8 @@ description: Use when 大肥鱼点歌/翻唱 (local singing pipeline).
 
 用户说「唱《歌名》」/「唱首歌」→ 自动找歌 → 换成大肥鱼嗓 → 把 mp3 发回聊天。全程本地，不用任何 API。
 
+> 换机器 / 给别人用：**代码已随技能打包在 `scripts/`**（sing.py / sing_service.py / fetch_bili.py …），从零搭建步骤见 `SETUP.md`。
+
 ## 位置
 - 项目：`C:\Users\32672\Apps\dafeiyu-sing\`（`sing.py` 主流水线 / `sing_service.py` QQ 点歌服务 / `send_to_qq.py` 发文件 / `songs/` 曲库 / `output/` 成品 / `work/` 中间产物）
 - 代码：`seed-vc-main/`（Plachtaa/Seed-VC，零样本歌声转换，**不用训练**）

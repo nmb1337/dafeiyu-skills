@@ -123,3 +123,23 @@ when it wedges, *every* process pointed at it loses the network, and clients ret
   relay wiring works rather than your own session's ambient environment.
 - A relay that forwards plain HTTP must also implement `CONNECT` for HTTPS and keep the client socket
   open while splicing bytes both ways; a naive per-request forwarder hangs uploads that carry a body.
+
+## GitHub push when git-over-https dies (relay mangles TLS / github.com blocked)
+
+Symptom: `git push` to github.com fails with `curl 56 Recv failure: Connection was reset` /
+`send-pack: unexpected disconnect`, and Python `urllib` through the relay throws
+`SSLV3_ALERT_BAD_RECORD_MAC` even with retries. Direct `github.com` is reset (blocked), but
+`api.github.com` **answers fine when called with `no_proxy='*'`**, and `gh api` works.
+
+Fix: push via the GitHub REST "git data" API instead of git transport:
+`scripts/push-via-api.py <owner/repo> <local_dir> [<commit message>]` (lives in `$HERMES_HOME/scripts/`).
+It uploads every staged blob (index content via `git cat-file blob :./path`, so autocrlf cannot skew it),
+verifies each remote blob SHA against the local index, then builds tree → commit → ref.
+
+- Empty repo: the git data API returns 409; the script first seeds a README via the contents API.
+- Run it with `no_proxy='*' NO_PROXY='*'` — api.github.com is reachable direct, the relay garbles TLS.
+- To bypass the `url.<mirror>.insteadOf` rewrite for a real git command without touching the global
+  config: `env HOME=<tmpdir> git -c credential.helper= -c 'credential.helper=!gh auth git-credential' …`.
+- Stuck pushes hold `git-remote-https` / `git-credential-helper-selector` (a GUI popup) open — kill
+  with `MSYS_NO_PATHCONV=1 taskkill /F /T /IM git-remote-https.exe`.
+- Pushed repo: `nmb1337/dafeiyu-skills` (77 skills). Re-push updates with the same script.
