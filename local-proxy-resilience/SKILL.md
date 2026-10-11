@@ -1,6 +1,6 @@
 ---
 name: local-proxy-resilience
-description: "Use when a proxy/accelerator toggle breaks local services."
+description: "Use when the proxy breaks local services or GitHub pushes."
 version: 1.0.0
 author: Hermes Agent
 license: MIT
@@ -18,6 +18,8 @@ including loopback calls, which is the part that makes it look like the service 
 
 ## When to Use
 - "Why can't you get online / search anymore" right after the user turned the accelerator off.
+- `git push` to GitHub dies (`Connection was reset`, `send-pack: unexpected disconnect`) or Python
+  through the relay throws `SSLV3_ALERT_BAD_RECORD_MAC` — see the GitHub push section below.
 - A bridge, watcher or gateway answers `WinError 10061` / `ProxyError: Unable to connect to proxy`
   against `127.0.0.1:<port>` even though the port is demonstrably listening.
 - Anything that must keep working while the user toggles the accelerator at will.
@@ -142,4 +144,21 @@ verifies each remote blob SHA against the local index, then builds tree → comm
   config: `env HOME=<tmpdir> git -c credential.helper= -c 'credential.helper=!gh auth git-credential' …`.
 - Stuck pushes hold `git-remote-https` / `git-credential-helper-selector` (a GUI popup) open — kill
   with `MSYS_NO_PATHCONV=1 taskkill /F /T /IM git-remote-https.exe`.
-- Pushed repo: `nmb1337/dafeiyu-skills` (77 skills). Re-push updates with the same script.
+### The skills mirror repo (public: `nmb1337/dafeiyu-skills`)
+Every custom skill — with its runnable `scripts/` and a per-pipeline `SETUP.md` — is published here. Maintenance loop:
+1. Re-sync the staging tree `C:\Users\32672\Documents\Codex\dafeiyu-skills` from the live skills dir (staging is
+   a copy; never edit it by hand):
+   `cd "$HERMES_HOME/skills" && tar cf - --exclude=.hub --exclude=__pycache__ --exclude="*.pyc" . | (cd <staging> && tar xf -)`
+   — a re-sync deletes the repo-root `README.md` (it does not live in the skills dir), so rewrite it each time.
+2. If staging lost its index (fresh re-sync), rebuild: `git -C "C:/Users/.../dafeiyu-skills" init -b main && git add -A`
+   (native `C:/` paths for native git).
+3. Push: `no_proxy='*' NO_PROXY='*' <venv python> scripts/push-via-api.py nmb1337/dafeiyu-skills <staging> "<msg>"`.
+   Incremental — it diffs against the remote tree and uploads only changed blobs, so re-runs are safe and fast.
+4. Verify a few paths: local index blob SHA (`git -C <staging> rev-parse ':./<path>'`) must equal the remote tree
+   entry (`gh api "repos/nmb1337/dafeiyu-skills/git/trees/main?recursive=1" --jq '.tree[]|select(.path=="<path>").sha'`).
+- Leak-scan before publishing: grep with the **actual** secret values read from the configs (never printed;
+  `grep -rIF -- "$SECRET" <tree> | wc -l` must be 0) plus generic `sk-|gho_|ghp_|Bearer <long>` patterns.
+- The QQ-distributed zip (`大肥鱼技能库.zip`) is the same tree one hop further (live → staging → zip). Verify the copy recipients actually open: `zipfile.testzip()` must return `None`, and its `SKILL.md` list must `comm`-match the live skills dir — a stale zip ships skills the repo no longer has.
+- A skill meant for other machines must ship its **runnable code** in the skill's `scripts/` plus a `SETUP.md`
+  (install steps, exact model sources such as the HuggingFace repo names). Prose-only skills cannot be executed
+  elsewhere. Exclude model weights, audio artifacts, voice references and venvs — document where to fetch them.

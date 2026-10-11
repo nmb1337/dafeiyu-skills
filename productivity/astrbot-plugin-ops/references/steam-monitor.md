@@ -45,6 +45,14 @@ game name as text plus the game's cover image to a QQ group.
   (or the plugin's own `steam test status` command). Faking it via `last_states.json` does **not** work — see the reload pitfall in SKILL.md.
 
 ## Adding another monitored account → group
+## 本机当前配置（2026-10-12）
+
+- `76561199857219177`（myself，**主人自己的号**）→ `napcat-qq:GroupMessage:1093496287`（2026-10-12 从 985804676 移过来）
+- `76561198962031597`（冀C二手电脑回收，**另一台电脑**）→ `napcat-qq:GroupMessage:1056523131`
+- 播报内容 = 文字（「X 开始玩 Y 了」/「X 退出了游戏 Y」）+ 游戏封面图（本地缓存后 base64 发；别把 URL 丢给 NapCat 现下，会超时丢整条）。
+- **改配置后必须重启 AstrBot** 才生效（插件启动时读一次；重启约 25 秒，6185/6199 起来即 OK）。
+- 点歌/画图的「主人在玩」判断**只认主人自己的号**（桥接 `_steam_now()` 取 monitored_targets[0]，绝不能被另一个号的游戏带偏——2026-10-12 踩过：冀C 玩 PUBG 被当成主人，拦了一晚上的画图/点歌）。
+
 The user asks in the shape 「<steamid64> 玩游戏就发到 QQ 群 <gid>，和我之前一样」. Each monitored target is an
 independent entry; a group with no entry never hears anything, so "nothing arrives in group X" usually means a
 missing/mistyped entry, not a broken monitor.
