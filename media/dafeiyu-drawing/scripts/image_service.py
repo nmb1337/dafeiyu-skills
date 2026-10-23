@@ -223,7 +223,7 @@ def _get(path: str) -> dict:
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
-def build_workflow(prompt: str, size: int, seed: int,
+def build_workflow(prompt: str, w: int, h: int, seed: int,
                    image: str | None = None, denoise: float = 0.75) -> dict:
     """Z-Image-Turbo 文生图 / 图生图（8 步，cfg 1.0，和已验证的工作流一致）。
 
@@ -244,7 +244,7 @@ def build_workflow(prompt: str, size: int, seed: int,
         latent = ["12", 0]
     else:
         wf["6"] = {"class_type": "EmptySD3LatentImage",
-                   "inputs": {"width": size, "height": size, "batch_size": 1}}
+                   "inputs": {"width": w, "height": h, "batch_size": 1}}
         latent = ["6", 0]
     wf["7"] = {"class_type": "KSampler", "inputs": {
         "model": ["11", 0], "seed": seed, "steps": 8, "cfg": 1.0,
@@ -257,12 +257,178 @@ def build_workflow(prompt: str, size: int, seed: int,
     return wf
 
 
-def generate(prompt: str, size: int, seed: int, image: str | None = None,
-             denoise: float = 0.75, timeout_s: int = 600):
-    """提交并等结果，返回产物路径（失败返回 None）。"""
+def _fit_src(src: str, dst) -> None:
+    """把底图适配到长边 ~1024（8 的倍数）：太大缩小、太小放大（最多 2 倍）。
+
+    踩过的坑：QQ 里的截图/竖图（480×1384、65KB 那种）直接喂 VAEEncode →
+    出图又小又糊，而且尺寸非标；配合高 denoise 几乎完全重画、和原图没关系。
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        shutil.copy2(src, dst)
+        return
+    im = Image.open(src).convert("RGB")
+    w, h = im.size
+    ms = max(w, h) or 1
+    scale = min(1024.0 / ms, 2.0)
+    if 0.92 <= scale <= 1.08 and ms >= 768:
+        im.save(dst)
+        return
+    nw = max(64, int(w * scale) // 8 * 8)
+    nh = max(64, int(h * scale) // 8 * 8)
+    im.resize((nw, nh), Image.LANCZOS).save(dst)
+
+
+def build_kontext_workflow(prompt: str, seed: int, image: str,
+                           steps: int = 20, guidance: float = 2.5) -> dict:
+    """FLUX.1-Kontext-dev（GGUF 量化）指令编辑：保人、按话改图。
+
+    结构与官方示例（ComfyUI_examples/flux/flux_kontext_example）逐节点对齐 ——
+    之前自己拼的简版缺 ModelSamplingFlux（shift）那一段，模型退化成"原图复印机"，
+    任何指令都不生效（主人 2026-10-12 实测：棉花地/鞭子指令被无视）。
+    """
+    return {
+        "12": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": KONTEXT_UNET}},
+        "11": {"class_type": "DualCLIPLoader", "inputs": {
+            "clip_name1": "t5xxl_fp8_e4m3fn.safetensors",
+            "clip_name2": "clip_l.safetensors", "type": "flux"}},
+        "10": {"class_type": "VAELoader", "inputs": {"vae_name": KONTEXT_VAE}},
+        "6":  {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["11", 0]}},
+        "26": {"class_type": "FluxGuidance", "inputs": {"guidance": guidance, "conditioning": ["6", 0]}},
+        "41": {"class_type": "LoadImage", "inputs": {"image": image, "upload": "image"}},
+        "40": {"class_type": "FluxKontextImageScale", "inputs": {"image": ["41", 0]}},
+        "39": {"class_type": "VAEEncode", "inputs": {"pixels": ["40", 0], "vae": ["10", 0]}},
+        "42": {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["26", 0], "latent": ["39", 0]}},
+        "27": {"class_type": "EmptySD3LatentImage",
+               "inputs": {"width": 1024, "height": 1024, "batch_size": 1}},
+        "30": {"class_type": "ModelSamplingFlux", "inputs": {
+            "max_shift": 1.15, "base_shift": 0.5, "width": 1024, "height": 1024,
+            "model": ["12", 0]}},
+        "17": {"class_type": "BasicScheduler", "inputs": {
+            "scheduler": "simple", "steps": steps, "denoise": 1.0, "model": ["30", 0]}},
+        "16": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+        "22": {"class_type": "BasicGuider", "inputs": {"model": ["30", 0], "conditioning": ["42", 0]}},
+        "25": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
+        "13": {"class_type": "SamplerCustomAdvanced", "inputs": {
+            "noise": ["25", 0], "guider": ["22", 0], "sampler": ["16", 0],
+            "sigmas": ["17", 0], "latent_image": ["27", 0]}},
+        "8":  {"class_type": "VAEDecode", "inputs": {"samples": ["13", 0], "vae": ["10", 0]}},
+        "9":  {"class_type": "SaveImage", "inputs": {"filename_prefix": "qq", "images": ["8", 0]}},
+    }
+
+
+KONTEXT_UNET = "flux1-kontext-dev-Q4_K_M.gguf"
+KONTEXT_VAE = "flux_ae.safetensors"
+
+
+def _to_english_instruction(prompt: str) -> str:
+    """Kontext 对中文指令几乎不理（T5 是英文脑子）→ 用 DeepSeek 先翻成英文再送。
+
+    实测（2026-10-12）：中文「在棉花地里被鞭子抽」= 原图复印机；同样的意思写成英文
+    = 棉花地、鞭子、保脸保衣服全部到位。翻译失败就退回原文。
+    """
+    import re as _re
+    if not _re.search(r"[\u4e00-\u9fff]", prompt or ""):
+        return prompt
+    try:
+        key = ""
+        for line in (HERMES_HOME / ".env").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip().startswith("DEEPSEEK_API_KEY"):
+                key = line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+        if not key:
+            return prompt
+        body = json.dumps({
+            "model": "deepseek-chat",
+            "messages": [
+                {"role": "system", "content": "Translate the image-editing instruction into concise, "
+                                              "literal ENGLISH for a text-to-image model. "
+                                              "Output ONLY the translation."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1, "max_tokens": 200,
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.deepseek.com/chat/completions", data=body,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+        with OPENER.open(req, timeout=25) as r:
+            out = json.loads(r.read().decode("utf-8", "replace"))
+        en = (((out.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+        if en:
+            log(f"指令转英文：{prompt!r} → {en!r}")
+            return en
+    except Exception as exc:
+        log(f"指令转英文失败（用原文）：{exc}")
+    return prompt
+
+
+def _to_detailed_prompt(prompt: str) -> str:
+    """Z-Image 官方/社区指南：它喜欢长而具体的结构化提示词（80-250 词最佳），
+    "你没说的它自己发挥"。所以先用 DeepSeek 把用户的短需求扩写成详细画面描述。
+    """
+    import re as _re
+    try:
+        key = ""
+        for line in (HERMES_HOME / ".env").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip().startswith("DEEPSEEK_API_KEY"):
+                key = line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+        if not key:
+            return prompt
+        body = json.dumps({
+            "model": "deepseek-chat",
+            "messages": [
+                {"role": "system", "content": "把用户的画图需求扩写成一段 80-150 词的详细中文画面描述："
+                                              "保留原意与主体，补充镜头、光线、构图、材质与氛围细节；"
+                                              "不要出现'高清/大师作品/最优质'这类空泛词；只输出描述本身。"},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.7, "max_tokens": 400,
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.deepseek.com/chat/completions", data=body,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+        with OPENER.open(req, timeout=25) as r:
+            out = json.loads(r.read().decode("utf-8", "replace"))
+        d = (((out.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+        if len(d) > len(prompt):
+            log(f"文生图提示词扩写：{prompt!r} → {d[:80]!r}…")
+            return d
+    except Exception as exc:
+        log(f"提示词扩写失败（用原文）：{exc}")
+    return prompt
+
+
+def generate(prompt: str, size: str, seed: int, image: str | None = None,
+             denoise: float = 0.75, timeout_s: int = 600, engine: str = "zimage"):
+    """提交并等结果，返回产物路径（失败返回 None）。
+
+    size 形如 "1024x1024" / "896x1152"（竖图）/"1152x896"（横图）。
+    engine：zimage = Z-Image-Turbo（文生图/轻改）；kontext = FLUX Kontext（指令编辑，要 image）。
+    """
     t0 = time.time()
-    res = _post("/prompt", {"prompt": build_workflow(prompt, size, seed, image, denoise),
-                            "client_id": "qq-image"})
+    try:
+        _s = str(size).lower().replace("×", "x")
+        w, h = ([int(x) for x in _s.split("x", 1)] if "x" in _s else (int(_s), int(_s)))
+    except Exception:
+        w = h = 1024
+    if engine == "kontext" and image:
+        # Kontext 天生保人，不需要提示词里的"保持…不变"尾巴（反而干扰指令）；
+        # 而且它只吃英文指令（中文=原图复印机）→ 先翻英文
+        prompt = prompt.replace("；务必保持原本人物的五官样貌和身上衣服不变", "").strip(" ；;")
+        prompt = _to_english_instruction(prompt)
+        # ComfyUI 官方提示技巧：明确写出"保持什么不变"效果最好（五官/发型/衣服）；
+        # 别提"保持姿势"——那会把用户要的动作（被鞭子抽）也钉死
+        if "unchanged" not in prompt.lower():
+            prompt = (prompt.rstrip(".。!！?？ ")
+                      + ". Keep the subject's facial features, hairstyle and clothing unchanged.")
+        wf = build_kontext_workflow(prompt, seed, image)
+    else:
+        # Z-Image 指南：它喜欢长而具体的提示词，短了它自己发挥 → 先扩写
+        prompt = _to_detailed_prompt(prompt)
+        wf = build_workflow(prompt, w, h, seed, image, denoise)
+    res = _post("/prompt", {"prompt": wf, "client_id": "qq-image"})
     pid = res.get("prompt_id")
     if not pid:
         log(f"提交失败：{json.dumps(res, ensure_ascii=False)[:400]}")
@@ -311,10 +477,14 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("umo", help="napcat-qq:FriendMessage:<uin> 或 :GroupMessage:<gid>")
     ap.add_argument("prompt")
-    ap.add_argument("--size", type=int, default=1024)
+    ap.add_argument("--size", default="1024x1024",
+                    help="WxH 或单数字：1024x1024 / 896x1152（竖）/ 1152x896（横）")
     ap.add_argument("--seed", type=int, default=-1, help="-1 = 随机（每张都不一样）")
     ap.add_argument("--image", default="", help="图生图：源图路径（桥接把被引用的图落盘后传进来）")
-    ap.add_argument("--denoise", type=float, default=0.75, help="图生图重绘幅度")
+    ap.add_argument("--denoise", type=float, default=0.55,
+                    help="图生图重绘幅度（0.5 小改保留特征 / 0.6 大改换场景）")
+    ap.add_argument("--engine", default="auto", choices=["auto", "zimage", "kontext"],
+                    help="auto=图生图走 Kontext 编辑、文生图走 Z-Image")
     a = ap.parse_args()
 
     WORK.mkdir(parents=True, exist_ok=True)
@@ -360,21 +530,49 @@ def main() -> int:
         except Exception as exc:
             log(f"说话失败：{exc}")
 
+    # 游戏/直播时的服务侧兜底：桥接派单前已经拦过一次，这里再挡一道 ——
+    # 跑一张 Kontext 要占显卡约 2 分钟，主人打游戏/直播时绝不能开跑
+    # （主人 2026-10-12：打游戏的时候委婉告诉他们并且停掉这个功能。跟唱歌同一套口径）
+    try:
+        if bridge._stream_mode_on():
+            tell("主人正在直播玩 MC 呢——画图要占显卡、会把直播卡成 PPT，等播完本鱼马上给你画～")
+            log("直播模式中：图片任务取消（服务侧兜底，未开工）")
+            LOCK.unlink(missing_ok=True)
+            return 0
+        _g = bridge._steam_now()
+        if _g:
+            tell(f"主人现在正在玩《{_g}》——本地画图要借显卡，现在开画会把他卡掉线，过半小时再来喊本鱼～")
+            log(f"游戏《{_g}》中：图片任务取消（服务侧兜底，未开工）")
+            LOCK.unlink(missing_ok=True)
+            return 0
+    except Exception as exc:
+        log(f"游戏/直播兜底检查失败（照常画）：{exc}")
+
     seed = a.seed if a.seed >= 0 else random.randint(1, 2**31 - 1)
     idle_s = float(os.environ.get("IMAGE_IDLE_SHUTDOWN_S") or 300)
     # 图生图：把桥接落盘的底图拷进 ComfyUI/input/（LoadImage 只认那里的文件，不认任意路径）
+    # 先做尺寸适配：QQ 里的截图/竖图（480×1384 那种）直接喂会又糊又小
     src_name = ""
+    engine = a.engine if a.engine != "auto" else (
+        "kontext" if (a.image and os.path.isfile(a.image)) else "zimage")
     if a.image and os.path.isfile(a.image):
         try:
             inp = ROOT / "ComfyUI" / "input"
             inp.mkdir(parents=True, exist_ok=True)
             src_name = (f"qqsrc_{int(time.time())}_{os.getpid()}"
                         f"{os.path.splitext(a.image)[1] or '.png'}")
-            shutil.copy2(a.image, inp / src_name)
+            if engine == "kontext":
+                # Kontext 自带 FluxKontextImageScale 挑最优分辨率，别先缩（缩了丢细节）
+                shutil.copy2(a.image, inp / src_name)
+            else:
+                _fit_src(a.image, inp / src_name)
         except Exception as exc:
             log(f"底图拷贝失败：{exc}")
             src_name = ""
-    log(f"开始{'图生图（denoise=%.2f）' % a.denoise if src_name else '文生图'}：{prompt!r} → {a.umo}")
+    if src_name:
+        log(f"开始图生图（denoise={a.denoise:.2f}）[{engine}]：{prompt!r} → {a.umo}")
+    else:
+        log(f"开始文生图[{engine}]：{prompt!r} → {a.umo}")
     tell(ACK_IMG2IMG if src_name else ACK_TEXT)
 
     try:
@@ -384,7 +582,7 @@ def main() -> int:
         # 起了 ComfyUI 就挂个独立看护（单例）。任务进程送完图就退，空闲关火是它的事 ——
         # 这样任务被拦下/出错提前返回时，显存也照样会被释放。
         spawn_watcher(idle_s)
-        out = generate(prompt, a.size, seed, src_name or None, a.denoise)
+        out = generate(prompt, a.size, seed, src_name or None, a.denoise, engine=engine)
         if not out:
             tell("画到一半本鱼手滑了，没画出来…再喊我一次试试？")
             return 1
@@ -396,6 +594,15 @@ def main() -> int:
         if not ok:
             tell("画是画好了，可本鱼发不出去…稍后再喊我一次吧")
             return 1
+        # 记下"这个聊天最近一张出图"：下次「把刚才那张改成…」链式修改要用它当底图
+        try:
+            import re as _re
+            _lo = HERMES_HOME / "cache" / "qq-images" / "last_out"
+            _lo.mkdir(parents=True, exist_ok=True)
+            (_lo / (_re.sub(r"[^A-Za-z0-9_.-]", "_", a.umo) + ".txt")).write_text(
+                str(out), encoding="utf-8")
+        except Exception:
+            pass
         _touch()
         return 0
     finally:

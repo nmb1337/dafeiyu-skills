@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.DS_Store
+.hub/
+.locks/
+.usage.json
+.usage.json.lock
+.curator_ledger.jsonl
+.curator_state
+.bundled_manifest

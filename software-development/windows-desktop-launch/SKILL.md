@@ -149,11 +149,21 @@ That is a GUI write plus a submit, and the submit is the part that fails silentl
   variable and the script dies on invocation.
 - Chinese window titles and console text come back mangled through bash→PowerShell capture
   (codepage). That is display-only: parse the underlying value, do not try to "fix" the encoding.
+  To carry the value itself out intact, write it from the PowerShell side
+  (`… | ConvertTo-Json | Out-File <tmp.json> -Encoding utf8`) and read that file — don't scrape it
+  from the console.
 - Do not launch the app again to "check" whether it is open — query the process list; duplicate
   windows are easy to leave on the user's desktop.
 - When the user offers a cause ("restricted mode is why you cannot see X"), test it against the
   app's own state/UI and report what you actually observed. Do the fix if it is worth doing anyway,
   but never confirm an unverified theory — it sends the user chasing the wrong thing.
+- **Launching an app whose exe name is Chinese: keep Chinese out of the command line.** Resolve the
+  path with a wildcard first — `$p = Get-Item '<dir>\*Launcher.exe'; Start-Process $p.FullName
+  -WorkingDirectory '<dir>'` (verified with 直播伴侣) — then verify it opened by sweeping windowed
+  processes, since name/path filters miss a just-started GUI app (permissions, encoding, timing):
+  `Get-Process | ? { $_.MainWindowTitle -ne '' } | Select Id,ProcessName,MainWindowTitle |
+  ConvertTo-Json | Out-File <tmp.json> -Encoding utf8` and read the file. The target's window title
+  in that list is the proof; do not launch a second copy to "check".
 
 ## General rules
 - Prefer CLI plus state files over screenshots; escalate to GUI automation only for steps that have no CLI.

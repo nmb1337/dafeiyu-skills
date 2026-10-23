@@ -27,7 +27,34 @@ user can scan straight from the chat window.
 5. The QR auto-refreshes on expiry (a few times) and prints a fresh URL through the same printer, so
    re-read the capture file rather than assuming the first URL is final.
 
-`scripts/capture_qr_login.py` implements steps 1–3 in one runnable command.
+`scripts/capture_qr_login.py` implements steps 1–3 in one runnable command. **它不在 checkout 里，而在技能目录**：`<skills>/autonomous-ai-agents/hermes-messaging-gateway/scripts/capture_qr_login.py`——从 checkout 根目录 `cd` 过去、用绝对路径调它，`import gateway.*` 才解析得到。
+
+选解释器：要有 `aiohttp, qrcode, cryptography`（本机实测只有某个 `installs/*/environments/*/venv` 带齐；桥接用的 websockets venv 没 aiohttp）。给**哪个档案**登录就把 `HERMES_HOME` 指到那个档案根目录（如 `profiles/client1`），否则凭证会写进默认档案。
+
+## Hands-off finish: creds → `.env` → restart
+
+The scan usually lands after the agent's turn has ended, and a confirmed scan alone does **not** put
+the bot online:
+
+1. `save_weixin_account` writes only `$HERMES_HOME/weixin/accounts/<account_id>.json`
+   (`token`, `base_url`, `user_id`). It never touches `.env` — that is the setup wizard's separate job
+   (`_setup_weixin`), so a script-driven login leaves a credentialed but unserved profile.
+2. Write the env pairs into **that profile's** `.env` (key-replace, keep comments, append what's
+   missing): `WEIXIN_ACCOUNT_ID`, `WEIXIN_TOKEN`, `WEIXIN_BASE_URL`, `WEIXIN_CDN_BASE_URL`,
+   `WEIXIN_ALLOW_ALL_USERS=false`, `WEIXIN_DM_POLICY=allowlist`, `WEIXIN_ALLOWED_USERS=<sender id>`.
+3. Restart the gateway — under `multiplex_profiles` the served adapters are enumerated at startup, so
+   a new profile credential is invisible until then. The restart must come from a process **outside**
+   the gateway's own turn (a detached watcher is fine; a `hermes gateway restart` issued from inside a
+   turn is refused by the guard).
+
+Working shape: the QR script writes a small status JSON (`wait|scaned|confirmed|expired`); a second
+background process polls it, and on `confirmed` reads the token from the account JSON (the status file
+only needs the account id), writes `.env`, then restarts. Everything after the scan is then automatic —
+the user only has to scan.
+
+Keep the PNG at a **stable path** so an expiry refresh overwrites the same file: re-sending it is then
+one command (to a QQ chat: OneBot `send_group_msg` with
+`{"type":"image","data":{"file":"file:///C:/abs/qr.png"}}` — see SKILL.md's outbound-image bullet).
 
 ## Pitfalls
 

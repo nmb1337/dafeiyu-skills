@@ -105,3 +105,5 @@ metadata:
 **必须用 wscript 拉起脱离进程**（见 `ComfyUI.vbs`），否则会话一结束服务就死。一键启动 `start_comfyui.bat`（桌面 `ComfyUI 生图.lnk` 指向它），**没做开机自启**——它空闲就占 4.5GB 显存，会挤掉 GPT-SoVITS 的 TTS 和游戏。
 
 **本机 curl 坑**：`curl -o /dev/null` 和 `-o /tmp/x` 都不行（原生 curl 不认 MSYS 路径，表现为 `http=200 got=0B`）。下载测试要落到真实相对路径再看文件大小。
+
+**NVIDIA 系 CDN（international.download.nvidia.com/.cn）下载要带 Referer**：裸 curl 一律 403（会跳转到 .cn 后被拦）；可用组合 = `--noproxy '*' -A "<Chrome UA>" -e "https://www.nvidia.com/en-us/geforce/broadcasting/broadcast-app/"`，实测 206 放行。**走 7899 中转反而 403**，必须直连（`--noproxy '*'`）。

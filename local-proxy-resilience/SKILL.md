@@ -106,6 +106,19 @@ when it wedges, *every* process pointed at it loses the network, and clients ret
   "who is retrying" answerable next time. After the fix, drain the sockets (`TIME_WAIT` clears in
   ~2 min) rather than rebooting.
 
+## Getting big model files in from abroad (HF / GitHub releases)
+- **hf-mirror.com is the working channel for HuggingFace** (direct, no proxy needed; send a browser
+  User-Agent). GitHub release assets / raw files go through `ghfast.top` (measured 25 MB/s). Both
+  bypass the relay — plain direct `curl --noproxy '*'`.
+- **Never use ranged requests (`-r 0-N`, `curl -C -`) or HEAD against these mirrors: they answer
+  HTTP 206/200 with 0 bytes, so the download "succeeds" into an empty file** (and a HEAD might show
+  317 bytes of redirect text). Plain whole-file `GET` works — validate with `stat -c %s` afterwards.
+- The repo layout matters more than the URL: a 404 on one path (e.g. `split_files/vae/ae.safetensors`)
+  just means try another repo; `hf-mirror.com/api/models/<repo>` (listings can be truncated) and the
+  GitHub trees API tell what actually exists. **Gated repos (BFL official) return a ~183-byte
+  "restricted" text body with HTTP 200** — a license wall, not a network fault; find a community
+  mirror (e.g. `camenduru/FLUX.1-dev` hosts the FLUX VAE).
+
 ## Pitfalls
 - **Package installs die mid-download through the accelerator**: `uv`/`pip` fetching wheels fail with
   `Failed to write to the distribution cache → cannot decrypt peer's message` — the accelerator
@@ -140,8 +153,8 @@ verifies each remote blob SHA against the local index, then builds tree → comm
 
 - Empty repo: the git data API returns 409; the script first seeds a README via the contents API.
 - Run it with `no_proxy='*' NO_PROXY='*'` — api.github.com is reachable direct, the relay garbles TLS.
-- To bypass the `url.<mirror>.insteadOf` rewrite for a real git command without touching the global
-  config: `env HOME=<tmpdir> git -c credential.helper= -c 'credential.helper=!gh auth git-credential' …`.
+- **A `url.<mirror>.insteadOf` rewrite in the global `.gitconfig` is a poison pill once its mirror dies — check it first, and delete it rather than working around it.** ghproxy-style mirrors disappear without notice; the rule silently rewrites *every* `github.com` URL (clones, fetches, and `hermes update`, which fetches the checkout's `origin`), so they all die as `schannel: failed to receive handshake, SSL/TLS connection failed` — which reads like a network fault, not a config one. Diagnose in this order: (1) `git config --global --list | grep -i insteadof`; (2) probe the mirror on both routes (`curl -s -o /dev/null -w '%{http_code}' --noproxy '*' https://<mirror>` and `-x http://127.0.0.1:7899`) — a dead mirror answers nothing either way; (3) probe the real host on both routes — direct `github.com` is blocked here, but **through the relay it answers 200**, so plain GitHub over the relay is the working channel. Fix: `git config --global --unset <rule>` (quote the key; it contains `://` and dots) + `git remote set-url origin https://github.com/...`, then prove it with `git fetch` and count `git rev-list --count HEAD..origin/<branch>`.
+- Keeping a per-command bypass instead (`GIT_CONFIG_GLOBAL=/dev/null`, `env HOME=<tmpdir>`) hides the trap from every *other* git user on the box and from `hermes update` — reserve it for a mirror rule you deliberately keep alive.
 - Stuck pushes hold `git-remote-https` / `git-credential-helper-selector` (a GUI popup) open — kill
   with `MSYS_NO_PATHCONV=1 taskkill /F /T /IM git-remote-https.exe`.
 ### The skills mirror repo (public: `nmb1337/dafeiyu-skills`)
@@ -162,3 +175,4 @@ Every custom skill — with its runnable `scripts/` and a per-pipeline `SETUP.md
 - A skill meant for other machines must ship its **runnable code** in the skill's `scripts/` plus a `SETUP.md`
   (install steps, exact model sources such as the HuggingFace repo names). Prose-only skills cannot be executed
   elsewhere. Exclude model weights, audio artifacts, voice references and venvs — document where to fetch them.
+- Before publishing (or when asked to 「检查技能有没有 bug」), run the skill's `scripts/audit-skills.py` over the live skills dir: YAML frontmatter presence, Python/sh/js syntax, JSON parse, dangling refs into the skill's own `references|scripts|templates/`, and local-path existence. Triage the output before editing — known false positives: refs into `$HERMES_HOME/scripts/*` or the Hermes repo (shared/dev trees, cited without a prefix) and path-regex hits truncated at a space (`C:\Program`).

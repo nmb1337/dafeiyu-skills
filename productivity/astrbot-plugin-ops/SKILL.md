@@ -38,6 +38,12 @@ whole reason for existing is pushing messages into QQ through NapCat.
 - To stop AstrBot answering with its own LLM persona in groups, set `provider_settings.enable = false` in `<core>/data/cmd_config.json`; it applies on restart. AstrBot leaves `cmd_config.json.bak-<timestamp>` when it rewrites the file — diffing that against the current file is the quickest way to see exactly what changed.
 - Restart the instance by hand with `<instance>/venv/Scripts/python.exe main.py` from `<core>`: the launcher does **not** respawn a killed instance, so killing it silently takes every QQ push down until you start it again.
 
+## Finding plugins (market + GitHub)
+- **Query with `gh`, not raw `curl`.** `api.github.com` rate-limits the shared host IP fast; the authenticated CLI is the reliable path: `gh search repos "astrbot <关键词>" --limit 5 --json fullName,stargazersCount,description`, and for a popularity slice `gh api "search/repositories?q=topic:astrbot-plugin&sort=stars&order=desc&per_page=40" --jq '.items[] | [.stargazers_count,.full_name,(.description // ""),.pushed_at] | @tsv'`. The topic covers ~400 repos; `gh search repos` handles Chinese keywords that break hand-built URLs.
+- **The whole market fits in one table.** `gh api repos/konley/astrbot-plugin-source-backup/contents/plugin_source.md --jq .content` returns base64 of a ~930-row markdown table (名称 / 作者 / 版本 / Star / 描述 / 标签 / 更新) mirrored from the plugin source; decode in Python, parse the rows, filter on keyword sets (游戏/互动/表情包/签到/运势/解析/修仙…), sort by Star. Write the `.b64` to a **native** path under `$HERMES_HOME/cache/scratch/`: bash's `$TMPDIR` is an MSYS path that Python's `os.environ['TMPDIR']` does not resolve to. Ready-to-run: `python scripts/find_plugins.py 游戏 互动 --min-star 2` does the fetch, decode and filter in one go.
+- **Screen before recommending.** Prefer command-triggered plugins. AstrBot's aiocqhttp adapter receives the same group/private events as the QQ bridge (`[napcat-qq(aiocqhttp)]` lines in `logs/astrbot.log`), so a plugin that replies opportunistically (auto-replies to images, comments on every message) double-answers alongside 大肥鱼 — only explicit-command plugins are safe to pin next to the bridge. Skip plugins that duplicate what the stack already owns (LLM persona/chat, memory, 点歌, 画图, live dashboard), and anything that fetches explicit sexual material. Treat 0★ repos as try-only: clone, read `main.py`, test in a scratch group before calling it working.
+- A curated shortlist with fit notes lives in `references/plugin-candidates.md`; re-check `stargazers_count` and `pushed_at` with `gh api repos/<full_name>` before quoting it — activity matters more than the number.
+
 ## Installing a plugin
 1. Find the plugin's repo (AstrBot plugins are `astrbot_plugin_*` repos on GitHub, or listed in the market).
 2. `cd <core>/data/plugins && git clone --depth 1 <repo_url> <plugin_dir>`. `--depth 1` matters — some plugin repos are large.
@@ -94,4 +100,6 @@ whole reason for existing is pushing messages into QQ through NapCat.
  wrong one has no effect, and an empty `system_prompt` persona is indistinguishable from no persona.
 
 ## References
+- `scripts/find_plugins.py` — fetch + filter the 930-row AstrBot plugin registry mirror (`python find_plugins.py 关键词… [--min-star N] [--limit N]`).
+- `references/plugin-candidates.md` — 群聊玩法插件候选清单（AstrBot + 独立项目），按玩法分类，带适配注意和「不装」清单。
 - `references/steam-monitor.md` — Steam game-status detection (SteamID, currently-playing appid, cover images), the installed `steam_monitor` plugin's config shape, and the steps to add another monitored account → QQ group.

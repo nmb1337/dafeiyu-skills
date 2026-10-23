@@ -20,6 +20,14 @@ import os
 import subprocess
 import sys
 
+# 这台机器控制台是 GBK：把本进程 stdout/stderr 锁成 utf-8，
+# 否则歌名带 emoji（🥳/⚡）时 print 直接 UnicodeEncodeError 把整条流水线崩掉。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 ROOT = r"C:\Users\32672\Apps\dafeiyu-sing"
 SEEDVC = os.path.join(ROOT, "seed-vc-main")
 PY = os.path.join(ROOT, ".venv", "Scripts", "python.exe")
@@ -35,7 +43,14 @@ OUT = os.path.join(ROOT, "output")
 
 def run(cmd, **kw):
     print("  $", " ".join(str(c) for c in cmd[:6]), "..." if len(cmd) > 6 else "")
-    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    # GBK 环境里 text=True 默认按 cp936 解码子进程输出；遇到非法字节读取线程会
+    # 抛 UnicodeDecodeError 并让 subprocess.run 挂死（demucs 进度条踩过）。
+    # 统一 utf-8 + errors=replace，并让子进程自己也用 utf-8 输出。
+    env = dict(kw.pop("env", None) or os.environ)
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    return subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", env=env, **kw)
 
 
 def separate(song: str, tag: str) -> tuple[str, str]:
@@ -46,6 +61,16 @@ def separate(song: str, tag: str) -> tuple[str, str]:
     注意：demucs 是在 cwd=work/ 下跑的，--song 传相对路径会找不到文件 → 这里统一转绝对路径。
     """
     song = os.path.abspath(song)
+    # demucs 的 torchaudio 在 Windows 上读不了 m4a/aac —— 先统一转 wav 再分离
+    # （2026-10-15 寄明月：m4a 直喂 demucs → "no channel / FFmpeg is not installed" ✗）
+    if os.path.splitext(song)[1].lower() not in (".mp3", ".wav", ".flac"):
+        pre = os.path.join(WORK, "pre")
+        os.makedirs(pre, exist_ok=True)
+        wav = os.path.join(pre, os.path.splitext(os.path.basename(song))[0] + ".wav")
+        if not os.path.isfile(wav):
+            print("[0/3] 源格式不是 mp3/wav —— 先转 wav…")
+            run([FFMPEG, "-y", "-i", song, wav])
+        song = wav
     outroot = os.path.join(WORK, "separated")
     stem = os.path.splitext(os.path.basename(song))[0]
     outdir = os.path.join(outroot, "htdemucs", stem)
@@ -75,7 +100,10 @@ def convert(vocal: str, reference: str, tag: str, semi_tones: int, steps: int, f
     for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "GIT_PROXY_COMMAND"):
         env.pop(k, None)
     env["NO_PROXY"] = env.get("NO_PROXY", "") + ",hf-mirror.com,huggingface.co,127.0.0.1,localhost"
-    r = subprocess.run(cmd, cwd=SEEDVC, capture_output=True, text=True, env=env)
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    r = subprocess.run(cmd, cwd=SEEDVC, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", env=env)
     if r.returncode != 0:
         print("  Seed-VC 失败：", (r.stderr or "")[-600:])
         return ""

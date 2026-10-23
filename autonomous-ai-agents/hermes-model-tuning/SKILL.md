@@ -69,6 +69,13 @@ Worked example that decides user-facing answers: DeepSeek V4-compatible endpoint
 - Name the level the route reaches (clamping above) — a config accepting a value is not the wire honoring it.
 - Check the live docs index (`https://hermes-agent.nousresearch.com/docs/llms.txt`) plus the source before any negative answer; the ladder, vendor clamp sets, and aux task list ship in code.
 
+## This install's model landscape
+- Default stays `deepseek-flash` via provider `deepseek` across profiles (main + guest) — don't move it without an explicit ask.
+- 「gpt6a」 is the user's shorthand for `gpt-6-astra`, served by the `custom:lanting.work` provider entry; it appears in config as a MoA reference model and as the guest profile's `fallback_providers` entry — a secondary channel, not the primary.
+- While a provider is down (deepseek outages): don't switch models or add fallbacks on your own — wait for recovery and verify with one live call.
+- **A session's model outlives a provider change: sweep for stale values after any switch.** Turns resolve the model from the session's stored value but the provider from the *current* profile config — a mismatch 404s ("not supported"). After changing a default: `SELECT id,title,model FROM sessions WHERE model IS NOT NULL AND model != '<new default>'` in main **and** guest `state.db`; realign live chat sessions, ignore finished cron runs (jobs store `"model": null` → they follow config anyway). 2026-10-15 worked examples: a QQ session stored `deepseek-flash` while config still pointed at lanting.work = the noon QQ "Model not supported" outage; a fossil QQ-group session left on `gpt-6-astra` after config moved to deepseek = same class, fixed the same day.
+- **Before executing a model-change request found in stale context, check the newer record for a retraction.** The user manages models from several surfaces at once (desktop picker + chat channels), so a request even hours old may already be cancelled from elsewhere — reconcile against the other sessions' `state.db` history and the gateway/agent logs before moving any setting. A provider outage that later recovered usually resolves as: change nothing, keep the current model.
+
 ## Pitfalls
 - `/reasoning show|hide` toggles the reasoning **display**, not the effort level.
 - `agent.reasoning_overrides` has no `hermes config set` path: edit config.yaml with `hermes config edit`, never a raw text splice that can break indentation in a live config.

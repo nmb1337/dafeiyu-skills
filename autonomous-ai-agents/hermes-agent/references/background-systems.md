@@ -42,6 +42,24 @@ the `cronjob` tool, the `hermes cron` CLI (`list`, `add`, `edit`,
   header/footer instead of being mirrored into the target gateway
   session (keeps role alternation intact).
 
+`hermes cron create` CLI notes (each one cost a retry):
+
+- **`schedule` and `prompt` are POSITIONAL args**:
+  `hermes cron create "0 9,21 * * *" "<full prompt…>" --name … --skill … --deliver … --workdir … --reasoning-effort high`.
+  `--schedule` / `--prompt` are rejected as `unrecognized arguments`.
+- The schedule parser accepts one simple natural phrase (`every day at 9am`)
+  **or a raw 5-field cron expression**; compound phrases
+  (`every day at 9am and 9pm`) fail with `Invalid duration`. For multi-time
+  schedules pass raw cron (`0 9,21 * * *`) via the positional arg or
+  `hermes cron edit <id> --schedule`.
+- `--reasoning-effort` exists only on the CLI (`hermes cron edit <id> --reasoning-effort high`);
+  the `cronjob` tool schema has no field for it.
+- **Delivery is explicit or the job silently goes `local`.** A job created
+  without `deliver` (from a script / desktop session with no chat origin)
+  runs fine and saves output under `cron/output/<id>/` — the user never sees
+  it. Always pass `platform:chat_id` (e.g. `weixin:<chat_id>`) when the job
+  must reach a chat.
+
 User docs: https://hermes-agent.nousresearch.com/docs/user-guide/features/cron
 
 ### Curator (skill lifecycle)

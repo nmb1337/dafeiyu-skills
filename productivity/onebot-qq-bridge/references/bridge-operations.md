@@ -156,6 +156,7 @@ proxy-bypassed reachability check is in the monitoring section above.
 | every send fails while the bridge looks healthy (`401`, `Invalid API key`, connection refused) | AstrBot was restarted/reinstalled: OpenAPI key rotated and/or the port moved | mint a new key in AstrBot's sqlite and update both consumers (below) |
 | an old session still answers with the previous voice | a live agent caches its system prompt in memory; editing `SOUL.md` does not touch it | inject the persona into that session or restart the gateway |
 | the reply the bot posts is a provider auth error (`… rejected your API key …`) | the sender's profile has its own `.env` with a stale provider key, and a profile `.env` shadows the main one for that profile only | validate each profile key and sync the working one (section below) |
+| every watchdog/Kuma alert silently missing, log shows `⚠ 推送微信失败: FileNotFoundError` | the push path hard-coded `bin\hermes.exe`, which a Hermes update removed/renamed | resolve candidates dynamically (`_hermes_cmds()`, feed-link/watchdog section) and prove with a real send |
 | a long stretch with no `[in]` lines, plus repeated `[ws] 断开 (WinError 10061)` | **two causes, identical in the log:** NapCat's OneBot WS feed (3001) is down (QQ client restarted) — or the bridge is reaching loopback *through the host accelerator proxy*, which is off | discriminate with `curl -s --noproxy '*' http://127.0.0.1:3001/`: `426` = feed healthy, so it is the proxy (make the bridge proxy-proof, section below); no answer = restart the QQ client; the bridge reconnects within seconds either way |
 
 ## AstrBot send-path credentials (401 / port moved)
@@ -210,8 +211,14 @@ check more than its own port:
   a real network problem rather than the accelerator's state. Score an HTTP 401/402/403 as *reachable*
   (the path works, the key is the problem) and only a connection error as a problem, or a stale key
   double-reports as a network outage.
-- Alert with `subprocess.run([os.path.join(HERMES_HOME, "bin", "hermes.exe"), "send", "--to", "weixin", text])
-  — no LLM, no cost, no dependency on the bridge being up.
+- Alert with the hermes CLI — but **resolve it dynamically; never hard-code `bin\hermes.exe`** — no LLM,
+  no cost, no dependency on the bridge being up. A hard-coded path here died silently (2026-10-07→15): an
+  update removed/renamed `bin\hermes.exe` (now `hermes.cmd`), every watchdog and Kuma alert threw
+  `FileNotFoundError` into the log, and **nothing reached the owner for 8 days** until the channel was
+  tested by hand. The fix (`_hermes_cmds()` in `qq-bridge-watchdog.py` / `uptime-alert.py`) resolves
+  candidates each call — `bin\hermes.exe` if present → newest `installs/*/environments/*/venv/Scripts/hermes.exe`
+  → `cmd.exe /c bin\hermes.cmd` — and tries each until one returns 0, logging every failed candidate.
+  Probe the channel with a real send whenever you touch it; `rc=0` + a `推送微信 rc=0` log line is the receipt.
 - **Dedupe through a state file** (`logs/watchdog-state.json`: previous problem set vs current) and
   notify only on new problems and on recoveries — a 10-minute task that re-sends the same alert every
   run gets muted by the user, and then real alerts are missed too.

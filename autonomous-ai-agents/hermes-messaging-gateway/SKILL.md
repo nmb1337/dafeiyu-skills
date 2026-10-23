@@ -22,6 +22,7 @@ operational procedure and the startup gates that actually block a platform from 
 
 - The user wants to connect, enable, or re-enable a messaging platform on the Hermes gateway
   (WeChat/weixin, WeCom, Telegram, Discord, Slack, WhatsApp, QQ, Signal, Matrix, ...).
+- 第二个人（客户/家人）的 QQ、微信要接进同一台机器，且要保留唱歌/画图这类功能 → 按 `references/multi-account-onboarding.md`（独立档案 + 各自凭证 + 第二个 QQ 实例/桥接）。
 - A platform shows as enabled in `config.yaml` but no adapter starts, or the gateway refuses to boot.
 - A QR-scan login is needed and the user cannot scan a terminal rendering.
 - Messages arrive but are denied, or `hermes send` cannot resolve a target.
@@ -64,7 +65,9 @@ platforms: drive the adapter's own login function and hand the user a scannable 
 
 **4. Write the credential env vars into `$HERMES_HOME/.env`.** Account ids and policies in the open;
 secrets belong in `.env` and must never be echoed into chat. See the `.env` pitfall below for how to
-edit that file.
+edit that file. A QR login's own `save_*_account` writes only its account JSON — not `.env` — so a scan
+that lands after your turn ended still needs this write **and** a restart; the hands-off watcher that
+does both is in `references/qr-login-flows.md` §Hands-off finish.
 
 **5. Enable the platform.** `platforms.<name>.enabled: true` must exist in `config.yaml` (the setup
 wizard writes it). Use `hermes config set` — never hand-edit `config.yaml`; a stray indent corrupts
@@ -75,7 +78,16 @@ enabled platform requires a gateway restart. **The gateway cannot restart itself
 `hermes gateway restart|stop|uninstall` issued from a terminal inside the gateway process is refused
 by a guard (SIGTERM would kill the command before it finished), so either ask the user to send
 `/restart` in chat (the gateway slash command that drains and restarts gracefully) or run it from a
-shell outside the gateway. Stage every config change first, then restart once. A change that only adds
+shell outside the gateway. Stage every config change first, then restart once — editing `config.yaml`
+or `.env` while the gateway runs triggers a live `[MULTIPLEX] Re-scanned profile '<p>' after config/.env
+change` that can leave that profile with 0 adapters; finish ALL edits, then do one final restart and
+re-check the `✓ <platform> connected (profile: <p>)` line afterwards. On Windows a
+`hermes gateway restart` issued from a desktop-tool shell can answer "The process may have been created
+and then killed — e.g. by a parent Job Object" and leave the gateway **stopped**: run
+`hermes gateway stop`, then start it detached from the login item —
+`explorer.exe "<…\Startup\Hermes_Gateway.vbs>"` — wait ~25 s and confirm with
+`hermes gateway status` plus the log (explorer.exe detaches the new process from your shell's job
+object). A change that only adds
 tools (a new MCP server) does not need the full restart for an open chat — `/reload-mcp` re-scans MCP
 servers into live sessions, `/reload-skills` does the same for skills. After it is back, read
 `$HERMES_HOME/logs/gateway.log` — it names the exact reason a platform was skipped or refused.
@@ -87,6 +99,10 @@ servers into live sessions, `/reload-skills` does the same for skills. After it 
 | Adapter up | `✓ <platform> connected` in `gateway.log` |
 | Gateway counts it | `Gateway running with N platform(s)` |
 | Real round trip | An inbound message produces a reply |
+
+`hermes gateway status` lists only the HTTP-inbound callback URLs per profile (`/p/<profile>/...`), so a
+long-poll platform (weixin, telegram) legitimately never shows up there — read `✓ <platform> connected`
+in the log instead of concluding from that list that the adapter is missing.
 
 For the third level the user must send the first message. `hermes send` cannot resolve a target until
 the platform's channel directory has discovered one **from an inbound message** — a cold channel
@@ -207,10 +223,21 @@ OneBot/NapCat, a custom bot framework) do NOT write an adapter — put a small b
   reads like a broken install. Prefer `allowlist` plus the user's own id: `open` exposes a personal
   agent to anyone who finds the bot, which is exactly what this gate exists to prevent.
 - **`multiplex_profiles: true` requires the platform's TOKEN env var, not just an account id.** Under
-  multiplex the startup check reads `platform_config.token`, populated only from the token env var.
+  multiplex the startup check reads  `platform_config.token`, populated only from the token env var.
   An id-only config is skipped silently:
   `Skipping <platform> on default profile: no bot credential in this profile's secrets.` Check
   `multiplex_profiles` in `config.yaml` before concluding an id-only setup should work.
+  A successful QR login writes only `<profile>/<platform>/accounts/<id>.json`; copy its `token` and
+  `base_url` into that profile's `.env` as `WEIXIN_TOKEN` / `WEIXIN_BASE_URL` alongside
+  `WEIXIN_ACCOUNT_ID` or the freshly scanned account still logs
+  `[MULTIPLEX] Profile '<p>': skipping weixin - no bot credential in this profile's secrets`. That
+  account JSON holds `token/base_url/user_id/saved_at` — the account id is the **file name**, not a
+  field.
+- **`hermes mcp add` is interactive even with every flag supplied.** It prints the discovered tools and
+  waits on `Enable all N tools? [Y/n/select]`; with no stdin it answers `Cancelled.` and saves nothing.
+  Pipe the confirmation — `printf 'Y\n' | hermes -p <profile> mcp add <name> --command <python> --args
+  <script>` — and note `--args` swallows the rest of the line, so it must come last. MCP servers are
+  per-profile: one registered for a client's profile never appears in the owner's.
 - **A host-wide proxy in the process environment makes the gateway mute whenever that proxy is off.**
   On a machine running a local accelerator (Clash/V2Ray-style, e.g. `127.0.0.1:7890`) the gateway
   inherits `HTTP_PROXY`/`HTTPS_PROXY`, so every adapter — and the model call itself — dies the moment
@@ -232,6 +259,7 @@ OneBot/NapCat, a custom bot framework) do NOT write an adapter — put a small b
   through the terminal — a Python read/replace that asserts the anchor string occurs exactly once —
   then verify with a grep that masks the value. Do not let `write_file` rewrite a secrets file from a
   read that may have been redacted.
+- **A weixin DM the bot starts itself fails until that person has messaged the bot.** The adapter answers `iLink sendmessage session not ready: ret=-2 errmsg=prepare failed — the user must send the bot a message first (or re-pair)` — that is the platform's session handshake, not a config error: on a fresh scan, after a gateway restart, or when a `context_token` has aged out, the bot cannot open the conversation. Ask the recipient to send one message (it re-establishes the token; `/new` first if they also changed persona), then retry; check `[Weixin] restored N context token(s)` in the log to see whether the previous session was carried over at all. Scheduled/cron deliveries to a DM can fail the same way while the gateway is reconnecting — treat that as expected fallout of a restart, not a broken job.
 - **Access-policy allowlist ids are inbound-sender ids, not login-identity ids.** A QR login returns
   the account's own `user_id`; the value the policy filter compares is the inbound message's
   `from_user_id`. When the allowlist silently denies, grep the gateway log for the deny line — it
@@ -253,11 +281,17 @@ its `disabled` default.
 
 ## Support files
 
-- `references/qr-login-flows.md` — turning a terminal QR login into a scannable image in chat.
+- `references/qr-login-flows.md` — turning a terminal QR login into a scannable image in chat, plus the
+  post-scan handoff (account JSON → `.env` → restart) that makes a scan go live without a second turn.
 - `references/runtime-layout.md` — where the venv, `facts.json`, logs and `.env` live; which
   interpreter to use for Hermes' own packages.
 - `references/onebot-qq-bridge.md` — bridging OneBot/NapCat (or another bot framework) into Hermes
   through the api_server, with per-sender profile tiers.
+- `references/multi-account-onboarding.md` — onboarding a second person on one install: per-profile
+  weixin credentials under multiplex, the pairing-approve flow, a second QQ account (NapCat instance +
+  offset ports), a second bridge instance, client self-service permissions (a sandbox MCP with no path
+  parameters for persona/skill edits), what to do when the owner insists on full tools
+  (soft-isolation checklist), and the feature/risk checklist.
 - `scripts/capture_qr_login.py` — capture a QR-login URL from an adapter and render it to PNG.
 - `scripts/forward_session_reply.py` — wait out a long session turn and deliver its final answer to a
   QQ target after the bridge's own request already gave up.

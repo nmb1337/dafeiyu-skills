@@ -1,6 +1,6 @@
 ---
 name: windows-local-app-setup
-description: "Use when installing a self-hosted app on this Windows host."
+description: "Use when installing a Windows self-hosted app, or fixing 弹窗/自启/看护 (stray console windows, autostart, watchdogs, 视奸设备状态)."
 version: 1.0.0
 author: Hermes Agent
 license: MIT
@@ -17,6 +17,7 @@ metadata:
 - 用户说「装一下 X / 把 X 跑起来 / 给我一个面板」—— 第三方应用要装到本机长期跑
 - 需要给本机服务换端口、用 pm2 / wscript 常驻、登记到看护脚本时
 - 登录自托管面板、首次建管理员账号、要凭据时
+- 有人问「视奸 / 我在干嘛 / 主人现在在做什么」→ 直查 Live Dashboard（recipe 见 references/live-dashboard.md）
 
 适用于「把第三方应用装到本机长期跑」这类任务（监控面板、TTS/视频模型、记忆层、浏览器 agent…）。目标不是装完就完，而是**跑起来、能被验证、挂了能自愈**。
 
@@ -41,7 +42,8 @@ metadata:
 - **浅克隆（`--depth 1`）会让仓库自带脚本里的 `git checkout <tag>` 失败**：要么 `git fetch --depth 1 origin refs/tags/<tag>:refs/tags/<tag>` 再 checkout，要么直接 `git clone --branch <tag>`。
 - 自写 VBS 启动器只在 pm2/服务方式都不行时才用；**VBS 文件里不要出现中文**（WSH 按 ANSI 读，某些汉字的字节序列会吃掉引号，报「未结束的字符串常量」），而且 `sh.Run` 手拼 cmd 引号很脆。
 - **写这些含 Windows 路径的启动/配置壳时，不要用 shell 的 heredoc**：`printf` 会把路径里的 `\U...` 当转义序列吃掉（`C:\Users` 直接烂成 `C:\Users?72`，脚本静默失效），`python - <<EOF` 里的 `C:\Users` 又会报 `unicodeescape` 语法错误。改成把生成脚本写成文件再跑、或直接用 `patch` 工具改那几个字——尤其是 Startup 目录下的包装脚本，它们只在重启时才被用到，写坏了你当场看不到。
-- 启动器要**自己会报错**：它依赖的东西（pm2、某个 exe、某个 venv）不在了就打印错误并非零退出，而不是静默什么都不做——否则故障要等到用户重启才发现。
+- 启动器要**自己会报错**：它依赖的东西（pm2、某个 exe、某个 venv）不在了要看得出来，而不是静默什么都不做——但**报错只能写日志文件，绝不用 `WScript.Echo`**。开机时经 `wscript.exe` 弹 Echo 就是模态框，没人点它就一直挂着；未捕获的运行错误再弹「脚本错误」框——两者每次开机叠加（实测一次开机在屏幕上卡了 5 个框）。写法：`Sub Say(t)` 追加一行到 `logs/startup-vbs.log`，脚本通体 `On Error Resume Next`、结尾 `WScript.Quit 0`；批量清理历史脚本可用 `patch` 的 `replace_all` 把 `WScript.Echo` 全换成 `Say`。注意 `cscript //nologo <脚本>` 直接跑等于真执行一遍（端口没起它就会真去拉服务——NapCat 这类会因此重开登录流程），验证前先知这个副作用。
+- **用户报「开机每次都弹报错」的修法**：先截屏读弹窗（标题 `Windows Script Host`，正文直接写着出错脚本的路径；截图用 `windows-desktop-launch` 技能的 `scripts/screenshot.ps1`）定位元凶；`Get-Process wscript | Stop-Process -Force` 清掉卡住的框；对 `gateway-service\*.vbs` 逐个 `cscript //nologo` 试跑（交互下跑干净、开机才炸也照样按上面的静默写法兜底）；改完重截图确认桌面干净，并让用户下次开机验证。
 
 ## 3. 缺编译器/缺资源：绕过去，别下几个 G 的构建工具
 
@@ -76,7 +78,7 @@ metadata:
 - 长期服务要**脱离 Hermes gateway 进程树**（gateway 重启会把子进程连坐杀死）——pm2 或 wscript 独立拉起。
 - 登记到已有看护脚本 `scripts/qq-bridge-watchdog.py` 的 `SERVICES` 列表，新服务/端口都要加一条，否则挂了没人拉；`launcher` 用**纯 ASCII 的 VBS**（见 §2），加完跑一次 `python scripts/qq-bridge-watchdog.py` 自测（全在听时应无动作、退出 0）。
 - 服务状态要能**推给用户**，不能只躺在面板里：告警链路（面板 webhook → 本机转发器 → `hermes send`）见 `references/selfhosted-alerting.md`。
-- 用户很在意电费和内存：**重量级的模型服务（TTS/视频）用完就停**，停完把释放的内存/显存报给他（例：GPT-SoVITS 停掉省 ~3.7G 内存 + ~1.4G 显存），同时留一个单实例 `start-api.bat`（纯 ASCII）供随时拉起。
+- 用户很在意电费和内存：**重量级的模型服务（TTS/视频）用完就停**，停完把释放的内存/显存报给他（例：GPT-SoVITS 停掉省 ~3.7G 内存 + ~1.4G 显存），同时留一个单实例 `start-api.bat`（纯 ASCII）供随时拉起。**这类服务不会自己闲时退出**（ComfyUI 有 idle watcher，GPT-SoVITS 没有——常驻实测吃 ~3.4G 内存）：用户说「电脑卡 / 打游戏卡」时按清单扫后台——`nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv` + 内存 Top（`Get-Process | Sort-Object WorkingSet64 -Descending` 前十几名）+ 端口地图（8188/8189/9880/25565…）——**只动自家服务**（用户自己开的浏览器/音乐/游戏只列出来让他自己决定）；发现闲置的重模型服务就杀，用时经启动器按需拉回（`gateway-service\TTS.vbs` 这类，拉回后先验证一次真能起来），并把省出的内存/显存报给他。
 - **手动拉起已装好的服务（用户说「把 X 打开 / 把 X 跑起来」）**：不要在 terminal 前台直接跑它——前台命令一旦被工具超时杀掉，服务跟着那个进程树一起死，端口回空，看起来像「打开了但什么都没在听」。用 `Start-Process … -WindowStyle Hidden -RedirectStandardOutput/-Error` 分离拉起；注意这种调用**本身可能一直挂着不返回**（重定向句柄不放），所以「拉起」和「验证」分成两次调用：先拉起就结束，再单跑 `netstat -ano | grep ':PORT .*LISTENING'` + `curl -s --noproxy '*' http://127.0.0.1:PORT/` 确认。
 - **服务在听 ≠ 它在干活**：面板型服务往往有独立的「任务运行中」状态，光起 web 进程它什么都不扫。拉起后还要按它的控制接口显式启动，再读 status/health 确认在跑（例：闲鱼监控只起 `src/server.js` 时 `/api/status` 是 `running:false` +「监控尚未启动」，要 `POST /api/monitor/start` 才开始扫描；端口 + HTTP 200 都正常也不代表任务在跑）。
 
@@ -92,6 +94,29 @@ metadata:
 5. **有些服务重启后必须要人**：QQ 客户端（注入式）需要扫码登录；这类服务的自启只能把它抬到登录界面，你要把"等登录"这个状态指出来（扫码图的位置：`NapCat.Shell/cache/qrcode.png` 变新 = 在等扫码；它的面板端口活着而业务端口不监听 = 没登录，不是配置坏了）。
 6. **修完立刻提交 + 写 PROGRESS**，并且当场验证一次（重启后端口全绿、桥接的事件流 `ws_connected: true`）。
 
+## 8. 后台任务/看护脚本不许弹黑窗（用户报「老是弹命令窗口」）
+
+- **根因排第一的是计划任务，不是别的会话/客户端。** Task Scheduler 里 `LogonType=Interactive` 的任务动作直接写 `cmd.exe`/`.cmd`，每次触发都真开一个控制台；Win11 默认终端是 Windows Terminal 时还会开成终端窗口/标签。用户打游戏全屏时每 5 分钟闪一下，非常扎眼。
+- **规矩**：定时看护一律 `wscript.exe "<纯 ASCII 启动器>.vbs"` 作任务动作，VBS 里 `sh.Run "cmd /c """ & cmd & """", 0, False`（窗口样式 0 = 完全不建窗口）。不要为了省事把 .cmd 直接填进任务动作，也不要指望任务属性里的 `Hidden` —— 那只管任务列表里的可见性，跟控制台窗口无关。
+- **排查顺序**（把弹窗出现的时间和任务 LastRunTime 对齐，比猜快得多）：
+  1. `Get-ScheduledTask | ? { $_.TaskPath -notlike '\Microsoft*' }` 列非系统任务；对可疑项 `Get-ScheduledTaskInfo` 看 `LastRunTime`/`NextRunTime`，5 分钟一弹就对得上 `PT5M` 的 Repetition。
+  2. 跑 `scripts/winwatch.ps1 -Seconds 400`（覆盖一个以上触发周期）：只记录**可见的**控制台窗口，`ConsoleWindowClass` / `PseudoConsoleWindow` / `CASCADIA_HOSTING_WINDOW_CLASS` 三类。`Get-Process ... MainWindowHandle` 不够用——隐藏控制台的进程也返回 0，而可见窗口挂在 conhost / 终端宿主进程上。
+  3. 还不够定位就 `scripts/procwatch.ps1 -Seconds 120`：抓新建的 cmd/conhost/python/powershell/wscript/ffmpeg 及其父进程，能看出是谁拉起的。
+  4. **先排除自家会话**：Hermes 的终端工具走 `windows_hide_flags()`（`CREATE_NO_WINDOW`），客户端/别的会话跑命令不会弹窗；要验证客户端在干嘛，看 `logs/qq-bridge-clientN.log` 和它的端口（桥接连不上时日志会刷 `WinError 10061`），别凭印象下结论。
+- **改完必须验证两个周期**：`Start-ScheduledTask` 手跑一次确认 `LastTaskResult=0`，再重跑 `winwatch.ps1` 覆盖下一次自然触发，确认零可见窗口。
+- **启动目录的包装 VBS 路径被写坏**（典型 `C:\Users?72`，printf/heredoc 吃掉反斜杠）：`read_file` 直接报 **binary file** 就是信号（野字节）。用 terminal `printf '%s\r\n' ...` 重写（反斜杠双写），`od -c` 确认全是 ASCII，再 `cscript //nologo` 旁边验证；这类文件只在开机时才被执行，写坏了当场看不出来。
+- 详细步骤、可复制的 PowerShell 片段和启动器模板见 `references/window-popup-triage.md`。
+
 ## 报进度的话术（用户偏好）
 
 大白话、先结论后细节；说清「我踩了什么坑 + 怎么修的 + 现在状态」，并把**真实验证输出**贴出来（几行就够）。别只报「已安装成功」。
+
+## References
+
+- `references/live-dashboard.md` — 视监面板（live-dashboard + AstrBot 插件）本机部署：为什么走 Bun 不走 Docker、从零重建步骤、Agent token 规则、踩过的坑（SQLITE_CANTOPEN / 启动器端口探测被代理劫持 / printf 吃反斜杠）。
+- `references/windows-build-pitfalls.md` — MSVC 缺失的包、torchcodec 无 Windows 版、垫片包写法、nltk_data 放置。
+- `references/gpt-sovits-api.md` — GPT-SoVITS 本地 API 的启动与调用。
+- `references/selfhosted-alerting.md` — 看护告警链路（面板 webhook → 转发器 → `hermes send`）。
+- `references/window-popup-triage.md` — 「老是弹命令窗口」的排查手册：计划任务定位、可见控制台窗口监控、隐藏启动器改法与验证。
+- `scripts/winwatch.ps1` — 盯 N 秒，只报可见控制台窗口（含 pid/标题），用来抓一闪而过的黑窗。
+- `scripts/procwatch.ps1` — 盯 N 秒，记录新建的控制台类进程 + 父进程 + 命令行，用来定位是谁拉起的。

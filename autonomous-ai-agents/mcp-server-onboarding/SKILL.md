@@ -48,6 +48,19 @@ metadata:
    `/reload-mcp`, and a failure is yours to fix before handing over.
 
 ## Pitfalls
+- **`--command` must be a native Windows path; a Git-bash `/c/...` path produces a dead server that still looks configured.** `hermes mcp add … --command /c/Users/…/.venv/Scripts/python.exe` answers `✗ Failed to connect: [WinError 2] 系统找不到指定的文件`, then (after the save-anyway prompt) writes the entry with `enabled: false` — `hermes mcp list` shows `✗ disabled` and no tool ever loads. Pass `C:/Users/…/.venv/Scripts/python.exe` (forward slashes are fine) and re-check the `✓ enabled` column after every add.
+- **Hand-written FastMCP tools must be `async def`.** The SDK runs tool handlers inside its own event loop, so a sync tool that calls `asyncio.run()` raises `RuntimeError: asyncio.run() cannot be called from a running event loop` on **every** call — while `tools/list` and `hermes mcp test` still look healthy, so the defect only surfaces the first time the model really uses the tool. Convert handlers to `async def` and `await` the underlying call; when converting, parenthesise — `(await _call(...)).get("data")`, not `await _call(...).get(...)` (the attribute access binds to the coroutine and the tool returns a crash instead of data).
+- **One server script, several scopes — parameterise with `--env`, never with path/URL tool arguments.** A per-profile admin server (persona/skill editor, own-bot controller) should take its scope from env (`CLIENT_PROFILE=…`, `QQ_NAPcat_WS=ws://127.0.0.1:3011`, `QQ_LABEL=…`) and keep every path/port hardcoded or env-derived; a tool parameter that accepts a path or URL lets one client reach another client's profile or bot. Register one instance per profile with the matching `--env` values.
+- **A remote HTTP MCP can hang the `add` past any sane timeout.** context7/deepwiki behind a local
+  proxy answered nothing for 300 s during connection validation, and the piped `y` did not help.
+  Pass `--connect-timeout 10`; if it still hangs, stop retrying and write the block into that
+  profile's `config.yaml` under `mcp_servers:` by hand (child keys indented 2 spaces, keep the file's
+  CRLF line endings), then confirm with `hermes -p <profile> mcp list`. Local stdio servers register
+  in seconds — a hang is the network, not a broken server.
+- **`hermes mcp add` writes to the ACTIVE profile.** Namespace it with `-p <profile>` for a client /
+  guest profile, and remember a profile's MCP tools inject into *every* platform toolset that profile
+  serves — a narrowed `platform_toolsets.api_server` does not keep a cloned MCP server away from the
+  same profile's WeChat/QQ agent.
 - **A "connected" server can still be useless.** Transport health is not tool health: a bridge
   into a desktop app answers every call with a domain error (e.g. "No workspace folder is open")
   until its host app is in the right state. Always fire one real tool call before telling the user

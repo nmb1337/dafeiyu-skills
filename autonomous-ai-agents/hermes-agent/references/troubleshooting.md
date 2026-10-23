@@ -79,3 +79,24 @@ hermes config set auxiliary.vision.model <model_name>
 ### "Reset permissions" / auto-approving everything
 See `references/security-privacy.md` — wipe the "Always allow" stores, don't touch yolo mode.
 
+### Local browser session won't start ("profile is locked" / "Chrome exited during startup")
+
+`browser_exec(local=true)` requires `browser.use_real_profile: true`. Setting the flag
+false makes `local=true` refuse outright ("local=true was requested but browser.use_real_profile
+is off"), and the cloud backend cannot reach LAN pages anyway (router admin UI at 192.168.x.x).
+With the flag on, Hermes copies the user's real Chromium/Edge profile, so **any running
+instance of that browser blocks the copy** — including background/tray mode that relaunches
+after a normal quit. `hermes browser close-profile` can still report "profile is still
+locked — another instance may have relaunched"; then force the browser itself:
+`MSYS_NO_PATHCONV=1 taskkill /F /T /IM msedge.exe` (or `chrome.exe`), verify with
+`Get-Process msedge` → 0, and retry.
+
+- **Ask before killing the user's browser** — unsaved tabs are lost (and tray mode can
+  respawn it, so name the loss explicitly). If they decline, stop fighting the tool and hand
+  them click-by-click instructions for the page (menu path + every field) — that fallback is
+  proven and often faster than the automation.
+- Credentials on such pages follow the vault rule: masked prompt via `browser_vault
+  save_login` or `hermes vault add`; never type or accept a password from chat.
+- If you toggled `browser.use_real_profile` for the attempt, restore the default afterwards:
+  `hermes config unset browser.use_real_profile`.
+
